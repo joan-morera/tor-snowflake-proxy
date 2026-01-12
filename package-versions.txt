@@ -1,5 +1,5 @@
 # Snowflake Proxy Versions
 
-snowflake-commit-e6b3622426fdc85b46caf2569a0923b76da7c213
+snowflake-version-v2.11.0
 tor-geoipdb-0.4.8.21-1~d13.trixie+1
 ca-certificates-20250419

@@ -14,19 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rebuild: ${{ steps.check.outputs.rebuild }}
-      snowflake_commit: ${{ steps.get_snowflake.outputs.commit }}
+      snowflake_version: ${{ steps.get_snowflake.outputs.version }}
       geoip_ver: ${{ steps.get_apt.outputs.geoip }}
       certs_ver: ${{ steps.get_apt.outputs.certs }}
       
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Fetch Latest Snowflake HEAD Commit
-      - name: Get Snowflake HEAD
+      # 1. Fetch Latest Snowflake Release Tag
+      - name: Get Snowflake Version
         id: get_snowflake
         run: |
-          COMMIT=$(git ls-remote https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake.git HEAD | awk '{print $1}')
-          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          TAG=$(git ls-remote --tags --sort='v:refname' https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake.git | grep "refs/tags/v" | grep -v "webext" | grep -v "\^{}" | tail -n1 | sed 's/.*\///')
+          echo "version=${TAG}" >> $GITHUB_OUTPUT
 
       # 2. Get Apt Package Versions (Tor GeoIP & CA Certs)
       - name: Get Apt Versions
@@ -68,7 +68,7 @@ jobs:
                return 1
             }
 
-            if check_ver "snowflake-commit" "${{ steps.get_snowflake.outputs.commit }}"; then CHANGED=true; fi
+            if check_ver "snowflake-version" "${{ steps.get_snowflake.outputs.version }}"; then CHANGED=true; fi
             if check_ver "tor-geoipdb" "${{ steps.get_apt.outputs.geoip }}"; then CHANGED=true; fi
             if check_ver "ca-certificates" "${{ steps.get_apt.outputs.certs }}"; then CHANGED=true; fi
             
@@ -115,11 +115,12 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.suffix }}
           build-args: |
-             SNOWFLAKE_VERSION=${{ needs.check-versions.outputs.snowflake_commit }}
+             SNOWFLAKE_VERSION=${{ needs.check-versions.outputs.snowflake_version }}
           platforms: ${{ matrix.platform }}
           provenance: false
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+
 
   # ---------------------------------------------------------------------------
   # Manifest Merge (Create 'latest' & version tag)
@@ -161,7 +162,7 @@ jobs:
              
              echo "# Snowflake Proxy Versions" > $FILE
              echo "" >> $FILE
-             echo "snowflake-commit-${{ needs.check-versions.outputs.snowflake_commit }}" >> $FILE
+             echo "snowflake-version-${{ needs.check-versions.outputs.snowflake_version }}" >> $FILE
              echo "tor-geoipdb-${{ needs.check-versions.outputs.geoip_ver }}" >> $FILE
              echo "ca-certificates-${{ needs.check-versions.outputs.certs_ver }}" >> $FILE
              
