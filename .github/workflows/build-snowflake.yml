@@ -1,0 +1,143 @@
+name: Build Snowflake Proxy
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      rebuild: ${{ steps.check.outputs.rebuild }}
+      snowflake_commit: ${{ steps.get_snowflake.outputs.commit }}
+      golang_digest: ${{ steps.get_golang.outputs.digest }}
+      geoip_ver: ${{ steps.get_apt.outputs.geoip }}
+      certs_ver: ${{ steps.get_apt.outputs.certs }}
+      
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. Fetch Latest Snowflake HEAD Commit
+      - name: Get Snowflake HEAD
+        id: get_snowflake
+        run: |
+          COMMIT=$(git ls-remote https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake.git HEAD | awk '{print $1}')
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+
+      # 2. Get Golang Image Digest
+      - name: Get Golang Digest
+        id: get_golang
+        run: |
+          DIGEST=$(docker manifest inspect golang:latest | jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest')
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      # 3. Get Apt Package Versions (Tor GeoIP & CA Certs)
+      - name: Get Apt Versions
+        id: get_apt
+        run: |
+          # Use a temporary container to check versions in the target environment
+          docker run --rm debian:trixie-slim sh -c '
+            apt-get update -qq && \
+            apt-get install -y -qq curl gpg gpg-agent ca-certificates debian-keyring > /dev/null && \
+            curl -s https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | gpg --import --quiet && \
+            gpg --export A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89 | apt-key add - 2>/dev/null && \
+            printf "deb https://deb.torproject.org/torproject.org trixie main\n" >> /etc/apt/sources.list.d/tor.list && \
+            apt-get update -qq && \
+            GEOIP=$(apt-cache policy tor-geoipdb | grep Candidate | awk "{print \$2}") && \
+            CERTS=$(apt-cache policy ca-certificates | grep Candidate | awk "{print \$2}") && \
+            echo "geoip=$GEOIP" && \
+            echo "certs=$CERTS"
+          ' > versions.txt
+          
+          cat versions.txt >> $GITHUB_OUTPUT
+
+      # 4. Check for Changes
+      - name: Check for Changes
+        id: check
+        run: |
+            FILE="package-versions.txt"
+            CHANGED=false
+            
+            check_ver() {
+               NAME=$1
+               NEW=$2
+               
+               # Get OLD
+               OLD=$(grep "^${NAME}-" $FILE | sed "s/^${NAME}-//")
+               
+               if [ "$NEW" != "$OLD" ]; then
+                  echo "NEW $NAME: $NEW (was $OLD)"
+                  return 0
+               fi
+               return 1
+            }
+
+            if check_ver "snowflake-commit" "${{ steps.get_snowflake.outputs.commit }}"; then CHANGED=true; fi
+            if check_ver "golang-image" "${{ steps.get_golang.outputs.digest }}"; then CHANGED=true; fi
+            if check_ver "tor-geoipdb" "${{ steps.get_apt.outputs.geoip }}"; then CHANGED=true; fi
+            if check_ver "ca-certificates" "${{ steps.get_apt.outputs.certs }}"; then CHANGED=true; fi
+            
+            if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+                CHANGED=true
+            fi
+
+            echo "rebuild=$CHANGED" >> $GITHUB_OUTPUT
+
+  build:
+    needs: check-versions
+    if: needs.check-versions.outputs.rebuild == 'true'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: snowflake-proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+             SNOWFLAKE_VERSION=${{ needs.check-versions.outputs.snowflake_commit }}
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+
+  update-repo:
+      needs: [check-versions, build]
+      if: always() && needs.build.result == 'success' && needs.check-versions.outputs.rebuild == 'true'
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - name: Update versions file
+          run: |
+             FILE="package-versions.txt"
+             
+             echo "# Snowflake Proxy Versions" > $FILE
+             echo "" >> $FILE
+             echo "snowflake-commit-${{ needs.check-versions.outputs.snowflake_commit }}" >> $FILE
+             echo "golang-image-${{ needs.check-versions.outputs.golang_digest }}" >> $FILE
+             echo "tor-geoipdb-${{ needs.check-versions.outputs.geoip_ver }}" >> $FILE
+             echo "ca-certificates-${{ needs.check-versions.outputs.certs_ver }}" >> $FILE
+             
+             git config --global user.name 'github-actions[bot]'
+             git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+             git add $FILE
+             if ! git diff --staged --quiet; then
+                git commit -m "build(snowflake): Update versions"
+                git push
+             fi
