@@ -1,6 +1,5 @@
 # Snowflake Proxy Versions
 
 snowflake-commit-e6b3622426fdc85b46caf2569a0923b76da7c213
-golang-image-sha256:b3dde9df96709c60c299573912ee80d5e91dc28a8021015e620276a017ec86e7
 tor-geoipdb-0.4.8.21-1~d13.trixie+1
 ca-certificates-20250419
